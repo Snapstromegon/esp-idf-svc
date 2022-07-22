@@ -782,6 +782,80 @@ impl EspWifi {
             ClientStatus::Started(ClientConnectionStatus::Disconnected)
         })
     }
+
+    pub fn subscribe_wifi_events(
+        &mut self,
+        callback: impl for<'a> FnMut(&'a WifiEvent) + Send + 'static,
+    ) -> Result<EspSubscription<System>, EspError> {
+        let callback = Arc::new(UnsafeCellSendSync(UnsafeCell::new(callback)));
+        let last_status = Arc::new(UnsafeCellSendSync(UnsafeCell::new(self.get_status())));
+        let waitable = self.waitable.clone();
+
+        let subscription =
+            self.sys_loop_stack
+                .get_loop()
+                .clone()
+                .subscribe(move |event: &WifiEvent| {
+                    let notify = {
+                        let shared = waitable.state.lock();
+
+                        let last_status_ref = unsafe { last_status.0.get().as_mut().unwrap() };
+
+                        if *last_status_ref != shared.status {
+                            *last_status_ref = shared.status.clone();
+
+                            true
+                        } else {
+                            false
+                        }
+                    };
+
+                    if notify {
+                        let cb_ref = unsafe { callback.0.get().as_mut().unwrap() };
+                        (cb_ref)(event);
+                    }
+                })?;
+        Ok(subscription)
+    }
+
+    pub fn subscribe_ip_events(
+        &mut self,
+        callback: impl for<'a> FnMut(&'a IpEvent) + Send + 'static,
+    ) -> Result<EspSubscription<System>, EspError> {
+        let callback = Arc::new(UnsafeCellSendSync(UnsafeCell::new(callback)));
+        let last_status = Arc::new(UnsafeCellSendSync(UnsafeCell::new(self.get_status())));
+        let waitable = self.waitable.clone();
+
+        let subscription =
+            self.sys_loop_stack
+                .get_loop()
+                .clone()
+                .subscribe(move |event: &IpEvent| {
+                    let notify = {
+                        let shared = waitable.state.lock();
+
+                        if shared.is_our_sta_ip_event(event) || shared.is_our_ap_ip_event(event) {
+                            let last_status_ref = unsafe { last_status.0.get().as_mut().unwrap() };
+
+                            if *last_status_ref != shared.status {
+                                *last_status_ref = shared.status.clone();
+
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+
+                    if notify {
+                        let cb_ref = unsafe { callback.0.get().as_mut().unwrap() };
+                        (cb_ref)(event);
+                    }
+                })?;
+        Ok(subscription)
+    }
 }
 
 impl Drop for EspWifi {
@@ -1045,71 +1119,20 @@ impl EventBus<()> for EspWifi {
         callback: impl for<'a> FnMut(&'a ()) + Send + 'static,
     ) -> Result<Self::Subscription, Self::Error> {
         let wifi_cb = Arc::new(UnsafeCellSendSync(UnsafeCell::new(callback)));
-        let wifi_last_status = Arc::new(UnsafeCellSendSync(UnsafeCell::new(self.get_status())));
-        let wifi_waitable = self.waitable.clone();
 
         let ip_cb = wifi_cb.clone();
-        let ip_last_status = wifi_last_status.clone();
-        let ip_waitable = wifi_waitable.clone();
 
-        let subscription1 =
-            self.sys_loop_stack
-                .get_loop()
-                .clone()
-                .subscribe(move |_event: &WifiEvent| {
-                    let notify = {
-                        let shared = wifi_waitable.state.lock();
+        let wifi_subscription = self.subscribe_wifi_events(move |_event: &WifiEvent| {
+            let cb_ref = unsafe { wifi_cb.0.get().as_mut().unwrap() };
+            (cb_ref)(&());
+        })?;
 
-                        let last_status_ref = unsafe { wifi_last_status.0.get().as_mut().unwrap() };
+        let ip_subscription = self.subscribe_ip_events(move |_event: &IpEvent| {
+            let cb_ref = unsafe { ip_cb.0.get().as_mut().unwrap() };
+            (cb_ref)(&());
+        })?;
 
-                        if *last_status_ref != shared.status {
-                            *last_status_ref = shared.status.clone();
-
-                            true
-                        } else {
-                            false
-                        }
-                    };
-
-                    if notify {
-                        let cb_ref = unsafe { wifi_cb.0.get().as_mut().unwrap() };
-
-                        (cb_ref)(&());
-                    }
-                })?;
-
-        let subscription2 =
-            self.sys_loop_stack
-                .get_loop()
-                .clone()
-                .subscribe(move |event: &IpEvent| {
-                    let notify = {
-                        let shared = ip_waitable.state.lock();
-
-                        if shared.is_our_sta_ip_event(event) || shared.is_our_ap_ip_event(event) {
-                            let last_status_ref =
-                                unsafe { ip_last_status.0.get().as_mut().unwrap() };
-
-                            if *last_status_ref != shared.status {
-                                *last_status_ref = shared.status.clone();
-
-                                true
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        }
-                    };
-
-                    if notify {
-                        let cb_ref = unsafe { ip_cb.0.get().as_mut().unwrap() };
-
-                        (cb_ref)(&());
-                    }
-                })?;
-
-        Ok((subscription1, subscription2))
+        Ok((wifi_subscription, ip_subscription))
     }
 }
 
